@@ -20,8 +20,8 @@ from utils.data_type import decide_data_type
 import pickle
 from math import comb
 from setproctitle import setproctitle
-from process_results.coding import LCB_generation_process_results
-setproctitle("lwd")  # 这里的 "my_script" 就是你希望在 nvidia-smi 显示的名字
+#from process_results.coding import LCB_generation_process_results
+setproctitle("refine")  # 这里的 "my_script" 就是你希望在 nvidia-smi 显示的名字
 
 # envs.VLLM_HOST_IP="0.0.0.0" or "127.0.0.1"
 
@@ -260,6 +260,10 @@ def infer(args):
         print(f"Pass@1: {correct_cnt}/{len(data_list)} = {correct_cnt / len(data_list):.4f}")
 
 if __name__ == "__main__":
+    # import debugpy
+    # debugpy.listen(5678)
+    # print("等待调试器附加…")
+    # debugpy.wait_for_client()
     args = parse_args()
     set_seed(args.seed)
     infer(args)
