@@ -1,0 +1,42 @@
+# 忽略 eval 下的大数据和模型
+eval/*.pt
+eval/*.ckpt
+eval/*.pkl
+eval/*.log
+eval/*.jsonl
+eval/*.npy
+eval/*.npz
+
+# 忽略 eval 下的输出目录
+eval/completions/
+eval/outputs/
+eval/generated_outputs/
+eval/OT_math_output/
+eval/open-thoughts/
+
+# 通用缓存
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+eval/question_index.faiss
+eval/question_index.faiss
+
+# 忽略所有 .pkl 文件
+*.pkl
+
+# 忽略所有 .index 文件
+*.index
+
+# 忽略 checkpoints、cache 等常见大目录
+checkpoints/
+logs/
+__pycache__/
+*.pt
+*.bin
+*.ckpt
+*.h5
+*.npy
+
+# 如果有 Jupyter 的输出文件也可以忽略
+.ipynb_checkpoints/

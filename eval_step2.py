@@ -1,269 +1,226 @@
-import json
-from transformers import AutoTokenizer
-from vllm import LLM, SamplingParams
-import re
-from datasets import load_dataset
-import importlib.util
-import os
-import argparse
-import vllm.envs as envs
+# Copyright 2025 The HuggingFace Team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Custom evaluation tasks for LightEval."""
+
 import random
-import time
-from datetime import datetime
-from tqdm import tqdm
-from utils.utils import set_seed, load_jsonl, save_jsonl, construct_prompt
-from utils.parser import *
-from utils.data_loader import load_data
-from utils.math_normalization import *
-from utils.grader import *
-from utils.data_type import decide_data_type
-import pickle
-from math import comb
-from setproctitle import setproctitle
-#from process_results.coding import LCB_generation_process_results
-setproctitle("refine")  # 这里的 "my_script" 就是你希望在 nvidia-smi 显示的名字
 
-# envs.VLLM_HOST_IP="0.0.0.0" or "127.0.0.1"
-
-def parse_list(arg):
-    return arg.split(',')
-
-def save_completions(completions, filepath):
-    with open(filepath, 'wb') as file:
-        pickle.dump(completions, file)
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--model_name_or_path', type=str, default="./", help="model dir")
-    parser.add_argument('--n_sampling', type=int, default=1, help="n for sampling")
-    parser.add_argument("--k", type=int, default=1, help="Value of k for pass@k calculation")
-    parser.add_argument("--data_dir", default="./data", type=str)
-    parser.add_argument('--data_name', type=str, default="math", help='identify how to extract answer')
-    parser.add_argument("--split", default="test", type=str)
-    parser.add_argument('--start_idx', type=int, default=0, help="data[start:end]")
-    parser.add_argument('--end_idx', type=int, default=-1, help="data[start:end], if -1, data[start:]")
-    parser.add_argument("--temperature", default=0, type=float)
-    parser.add_argument("--max_tokens", default=2048, type=int)
-    parser.add_argument("--prompt_type", default="qwen-base", type=str)
-    parser.add_argument("--prompt_file_path", default="./prompts", type=str)
-    parser.add_argument("--output_dir", default="./outputs", type=str)
-    parser.add_argument('--stop', type=parse_list)
-    parser.add_argument("--top_p", default=1, type=float)
-    parser.add_argument("--seed", default=0, type=int)
-    parser.add_argument("--dtype", default='auto', type=str)
-    parser.add_argument("--completions_save_dir", default='./completions', type=str)
-    parser.add_argument('--cot_dir', type=str, default="./generated_cot", help="output dir") 
-    parser.add_argument("--use_teacher", action="store_true",  help="use_teacher_prompt")
-    parser.add_argument("--teacher_cot_path", default="./generated_cot", type=str)
-    parser.add_argument("--surround_with_messages", action="store_true",  help="use_teacher_prompt")
-    args = parser.parse_args()
-    
-    args.top_p = 1 if args.temperature == 0 else args.top_p # top_p must be 1 when using greedy 
-    print(f"current stop list: {args.stop}")
-    return args
-
-def get_conversation_prompt_by_messages(tokenizer, messages):
-    text = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True
-    )
-    return text
-
-def get_three_prompt(prompt_type, data_name):
-    file_path = os.path.join(".", "prompts", prompt_type, f"{data_name}.py")
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"File not found: {file_path}")
-    spec = importlib.util.spec_from_file_location("dynamic_module", file_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    
-    if hasattr(module, 'system_prompt'):
-        system_prompt = module.system_prompt
-    else:
-        raise AttributeError(f"'system_prompt' not found in {file_path}")
-    
-    if hasattr(module, 'few_shot_prompt'):
-        few_shot_prompt = module.few_shot_prompt
-    else:
-        raise AttributeError(f"'few_shot_prompt' not found in {file_path}")
-    
-    if hasattr(module, 'question_format'):
-        question_format = module.question_format
-    else:
-        raise AttributeError(f"'question_format' not found in {file_path}")
-
-    return system_prompt, few_shot_prompt, question_format
+from lighteval.metrics.dynamic_metrics import (
+    ExprExtractionConfig,
+    IndicesExtractionConfig,
+    LatexExtractionConfig,
+    multilingual_extractive_match_metric,
+)
+from lighteval.tasks.lighteval_task import LightevalTaskConfig
+from lighteval.tasks.requests import Doc
+from lighteval.utils.language import Language
+from lighteval.metrics.metrics import Metrics
+import json
 
 
-def infer(args):
-    model_name_or_path = args.model_name_or_path
-    print(f"current eval model: {model_name_or_path}")
-    examples = load_data(args.data_name, args.split, args.data_dir)
-    data_type = decide_data_type(args.data_name)
-    n_sampling = args.n_sampling
-    factor = 1
-    for i in range(2, 65):
-        if n_sampling % i == 0:
-            factor = i
-    generation_epoch = n_sampling // factor
-    print(f"use n = {factor}, generation epoch is: {generation_epoch}")
-    sampling_params = SamplingParams(temperature=args.temperature, 
-                                     max_tokens=args.max_tokens, 
-                                     n=factor,
-                                     top_p=args.top_p,
-                                     )
-    
-    model_name = "/".join(args.model_name_or_path.split("/")[-3:])
-    out_file_prefix = f'{args.split}_{args.prompt_type}_t{args.temperature}'
-    out_file = f'{args.output_dir}/{model_name}/{args.data_name}/{out_file_prefix}_k{args.n_sampling}_s{args.start_idx}_e{args.end_idx}.jsonl'
-    
-    
-    if os.path.exists(out_file):
-        print(f"Completely same name file({out_file}) exist, skip generation, save file and check correct")
-        return
-    os.makedirs(f'{args.output_dir}/{model_name}/{args.data_name}', exist_ok=True)
-    os.makedirs(f'{args.completions_save_dir}/{model_name}/{args.data_name}', exist_ok=True)
-    
-    available_gpus = os.environ['CUDA_VISIBLE_DEVICES'].split(',')
-    if len(available_gpus) == 1:
-        envs.VLLM_HOST_IP="0.0.0.0" or "127.0.0.1"
-    print(f"available_gpus: {available_gpus}")
-    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True)
-    prompt_batch = []
-    prompt_save_path = f"{args.output_dir}/{model_name}/{args.data_name}/prompts.txt"
-    with open(prompt_save_path, "w", encoding="utf-8") as f:
-        f.write("")
-    data_list = []
-    with open(f"{args.teacher_cot_path}/generated_reasonings.jsonl", "r", encoding="utf-8") as f:
+
+# Prompt template adapted from
+# - simple-evals: https://github.com/openai/simple-evals/blob/6e84f4e2aed6b60f6a0c7b8f06bbbf4bfde72e58/math_eval.py#L17
+# - Llama 3: https://huggingface.co/datasets/meta-llama/Llama-3.2-1B-Instruct-evals/viewer/Llama-3.2-1B-Instruct-evals__math__details?views%5B%5D=llama_32_1b_instruct_evals__math__details
+# Note that it is important to have the final answer in a box for math-verify to work correctly
+
+def get_generated_reasoning(filename, question):
+    with open(filename, 'r', encoding='utf-8') as f:
         for line in f:
-            data = json.loads(line.strip()) 
-            data_list.append(data)
-    for item in tqdm(data_list, total=len(data_list)):
-        # parse question and answer
-        question = item["test_question"]
-        cot = item["generated_reasoning"]
-        # preprocess Teacher COT
-        cot = cot.split("</think>")[0].strip()
-        cot = cot.split("**Final Answer**")[0].strip()
-        if data_type == 'math':
-            cur_prompt = f"""Please reason step by step and put your final answer within \\boxed{{}}.\n Question: {question}"""
-        elif data_type == 'code':
-            cur_prompt = f"""Please reason step by step for the following coding problem. Provide the final implementation in Python code.\n\nQuestion:\n{question}"""
-        if args.use_teacher:
-            messages = [
-                {"role": "user", "content": cur_prompt},
-                {"role": "assistant", "content": cot},
-            ]
-            cur_prompt = get_conversation_prompt_by_messages(tokenizer=tokenizer, messages=messages)
-        else:
-            messages = [
-                {"role": "user", "content": cur_prompt},
-            ]
-            cur_prompt = get_conversation_prompt_by_messages(tokenizer=tokenizer, messages=messages)
-        with open(prompt_save_path, "a", encoding="utf-8") as f:
+            data = json.loads(line)
+            if data.get("test_question") == question:
+                return data.get("generated_reasoning", "")
+    return ""  
 
-            f.write(f"Prompt for question {len(prompt_batch)}:\n{cur_prompt}\n\n")
-        prompt_batch.append(cur_prompt)
-    print(prompt_batch[0])
-    
-    llm = LLM(model=model_name_or_path, 
-              tensor_parallel_size=len(available_gpus), 
-              trust_remote_code=True, 
-              gpu_memory_utilization=0.8,
-              )
-    
-    file_outputs = []
-    correct_cnt = 0
-    for cur_generation_epoch in range(generation_epoch):
-        completions_save_file = f'{args.completions_save_dir}/{model_name}/{args.data_name}/{out_file_prefix}_k{args.n_sampling}_s{args.start_idx}_e{args.end_idx}_gen_round{cur_generation_epoch}.pkl'
-        
-        completions = llm.generate(prompt_batch, sampling_params)
 
-        save_completions(completions, completions_save_file)
-        for i, item in enumerate(data_list):
-            question = item["test_question"]
-            generated_responses = [completions[i].outputs[j].text for j in range(len(completions[i].outputs))]
-            if cur_generation_epoch == 0:
-                file_outputs.append({
-                    "question": question,
-                    "generated_responses": generated_responses,
-                })
-            else:
-                file_outputs[i]['generated_responses'] += generated_responses
-    print("llm generate done")
-    print(len(file_outputs))
-    
-    pass_at_k_list = []
-    k = args.k
-    
-    if data_type == 'math':
-        for i in tqdm(range(len(examples)), "check correct..."):
-            d = examples[i]
-            gt_cot, gt_ans = parse_ground_truth(d, args.data_name)
-            generated_responses = file_outputs[i]['generated_responses']
-            generated_answers = [extract_answer(generated_response, args.data_name) for generated_response in generated_responses]
-            is_correct_list = [check_is_correct(generated_answer, gt_ans) for generated_answer in generated_answers]
-            is_correct = any(is_correct_list)
-            if is_correct:
-                correct_cnt += 1
-            file_outputs[i]['generated_answers'] = generated_answers
-            file_outputs[i]['gold_answer'] = gt_ans
-            file_outputs[i]['is_correct'] = is_correct
-            file_outputs[i]['answers_correctness'] = is_correct_list
-            
-            if len(is_correct_list) > 1:
-                correct_answers = sum(is_correct_list)
-                n = len(generated_answers)
-                if correct_answers > 0:
-                    if n - correct_answers < k:
-                        pass_at_k = 1
-                    else:
-                        pass_at_k = 1 - (comb(n - correct_answers, k) / comb(n, k))
-                    pass_at_k_list.append(pass_at_k)
-                else:
-                    pass_at_k_list.append(0)
-    # elif args.data_type == 'code':
-    #     pbar = tqdm(range(len(data_list)), desc="check correct...")
-    #     for i in pbar:
-    #         ...
-    #         generated_responses = file_outputs[i]['generated_responses'][0]
-    #         question= ds[i]
-    #         # print(LCB_generation_process_results(question, generated_responses))
-    #         correct_cnt+=LCB_generation_process_results(question, generated_responses)
-    #         pbar.set_postfix({
-    #             "correct": f"{correct_cnt}/{i+1}",
-    #             "acc": f"{correct_cnt / (i+1):.4f}"
-    #         })
 
-            
-    
-    temp_out_file = out_file + ".tmp"
-    with open(temp_out_file, 'w', encoding='utf-8') as f:
-        count = 0
-        for d in tqdm(file_outputs, "writing generation to jsonl file..."):
-            f.write(json.dumps(d, ensure_ascii=False))
-            f.write("\n")
-            count += 1
-            if count % 100 == 0:
-                f.flush()
-        f.flush()
-    os.rename(temp_out_file, out_file)
-    
-    print(f"correct cnt / total cnt: {correct_cnt}/{len(data_list)}")
-    print(f"Acc: {correct_cnt / len(data_list):.4f}")
 
-    if pass_at_k_list:
-        average_pass_at_k = sum(pass_at_k_list) / len(pass_at_k_list)
-        print(f"Pass@{k}: {sum(pass_at_k_list)}/{len(pass_at_k_list)} = {average_pass_at_k:.4f}")
-    else:
-        print(f"Pass@1: {correct_cnt}/{len(data_list)} = {correct_cnt / len(data_list):.4f}")
+MATH_QUERY_TEMPLATE = """{Question}""".strip()
 
+# Prompt template from simple-evals: https://github.com/openai/simple-evals/blob/83ed7640a7d9cd26849bcb3340125002ef14abbe/common.py#L14
+GPQA_QUERY_TEMPLATE = """
+Answer the following multiple choice question. The last line of your response should be of the following format: 'Answer: $LETTER' (without quotes) where LETTER is one of ABCD. Think step by step before answering.
+
+{Question}
+
+A) {A}
+B) {B}
+C) {C}
+D) {D}
+""".strip()
+GRGC_QUERY_TEMPLATE = """
+Answer the following question. The last line of your response should be of the following format: 'Answer: $ANSWER' (without quotes) where ANSWER is for your input. Think step by step before answering.
+
+{Question}
+""".strip()
+latex_gold_metric = multilingual_extractive_match_metric(
+    language=Language.ENGLISH,
+    fallback_mode="first_match",
+    precision=5,
+    gold_extraction_target=(LatexExtractionConfig(),),
+    # Match boxed first before trying other regexes
+    pred_extraction_target=(ExprExtractionConfig(), LatexExtractionConfig(boxed_match_priority=0)),
+    aggregation_function=max,
+)
+
+expr_gold_metric = multilingual_extractive_match_metric(
+    language=Language.ENGLISH,
+    fallback_mode="first_match",
+    precision=5,
+    gold_extraction_target=(ExprExtractionConfig(),),
+    # Match boxed first before trying other regexes
+    pred_extraction_target=(ExprExtractionConfig(), LatexExtractionConfig(boxed_match_priority=0)),
+    aggregation_function=max,
+)
+
+gpqa_metric = multilingual_extractive_match_metric(
+    language=Language.ENGLISH,
+    gold_extraction_target=[IndicesExtractionConfig(prefix_for_extraction="NativeLetters")],
+    pred_extraction_target=[IndicesExtractionConfig(prefix_for_extraction="NativeLetters")],
+    precision=5,
+)
+
+
+def math_prompt_fn(line, task_name: str = None):
+    return Doc(
+        task_name=task_name,
+        query=MATH_QUERY_TEMPLATE.format(Question=line["problem"]),
+        reasoning=get_generated_reasoning("generated_cot/generated_reasonings.jsonl", line["problem"]),
+        choices=[line["solution"]],
+        gold_index=0,
+    )
+
+
+def aime_prompt_fn(line, task_name: str = None):
+    return Doc(
+        task_name=task_name,
+        query=MATH_QUERY_TEMPLATE.format(Question=line["problem"]),
+        # reasoning=get_generated_reasoning("/disk4/Haonan/zihang/rag-refine/RAG-Teacher-Prompt/generated_cot_test/generated_reasonings_iteration_3.jsonl", line["problem"]),
+        reasoning=get_generated_reasoning("/disk4/Haonan/zihang/rag-refine/RAG-Teacher-Prompt/saved_generated_reasonings/generated_reasonings_7B_example.jsonl", line["problem"]),
+        choices=[line["answer"]],
+        gold_index=0,
+    )
+
+
+def gpqa_prompt_fn(line, task_name: str = None):
+    gold_index = random.randint(0, 3)
+    choices = [line["Incorrect Answer 1"], line["Incorrect Answer 2"], line["Incorrect Answer 3"]]
+    choices.insert(gold_index, line["Correct Answer"])
+    query = GPQA_QUERY_TEMPLATE.format(
+        A=choices[0], B=choices[1], C=choices[2], D=choices[3], Question=line["Question"]
+    )
+    return Doc(
+        task_name=task_name,
+        query=query,
+        choices=["A", "B", "C", "D"],
+        gold_index=gold_index,
+        instruction=query,
+    )
+
+def grgc_instruct(line, task_name: str = None):
+    return Doc(
+        task_name=task_name,
+        query=GRGC_QUERY_TEMPLATE.format(Question=line["question"]),
+        choices=[line["answer"]],
+        gold_index=0,
+    )
+
+# Define tasks
+aime24 = LightevalTaskConfig(
+    name="aime24",
+    suite=["custom"],
+    prompt_function=aime_prompt_fn,
+    hf_repo="HuggingFaceH4/aime_2024",
+    hf_subset="default",
+    hf_avail_splits=["train"],
+    evaluation_splits=["train"],
+    few_shots_split=None,
+    few_shots_select=None,
+    generation_size=32768,
+    metric=[expr_gold_metric],
+    version=1,
+)
+aime25 = LightevalTaskConfig(
+    name="aime25",
+    suite=["custom"],
+    prompt_function=aime_prompt_fn,
+    hf_repo="yentinglin/aime_2025",
+    hf_subset="default",
+    hf_avail_splits=["train"],
+    evaluation_splits=["train"],
+    few_shots_split=None,
+    few_shots_select=None,
+    generation_size=32768,
+    metric=[expr_gold_metric],
+    version=1,
+)
+math_500 = LightevalTaskConfig(
+    name="math_500",
+    suite=["custom"],
+    prompt_function=math_prompt_fn,
+    hf_repo="HuggingFaceH4/MATH-500",
+    hf_subset="default",
+    hf_avail_splits=["test"],
+    evaluation_splits=["test"],
+    few_shots_split=None,
+    few_shots_select=None,
+    generation_size=32768,
+    metric=[latex_gold_metric],
+    version=1,
+)
+gpqa_diamond = LightevalTaskConfig(
+    name="gpqa:diamond",
+    suite=["custom"],
+    prompt_function=gpqa_prompt_fn,
+    hf_repo="Idavidrein/gpqa",
+    hf_subset="gpqa_diamond",
+    hf_avail_splits=["train"],
+    evaluation_splits=["train"],
+    few_shots_split=None,
+    few_shots_select=None,
+    generation_size=32768,  # needed for reasoning models like R1
+    metric=[gpqa_metric],
+    stop_sequence=[],  # no stop sequence, will use eos token
+    trust_dataset=True,
+    version=1,
+)
+grgc = LightevalTaskConfig(
+    name="grgc",
+    suite=["custom"],
+    prompt_function=grgc_instruct,
+    hf_repo="weidaliang/gr_gc",
+    hf_subset="default",
+    hf_avail_splits=["test"],
+    evaluation_splits=["test"],
+    few_shots_split=None,
+    few_shots_select=None,
+    generation_size=32768,
+    metric=[Metrics.quasi_exact_match,
+        Metrics.prefix_exact_match,
+        Metrics.prefix_quasi_exact_match,
+        Metrics.f1_score_macro,
+        Metrics.f1_score_micro,],
+    version=1,
+)
+# Add tasks to the table
+TASKS_TABLE = []
+TASKS_TABLE.append(aime24)
+TASKS_TABLE.append(aime25)
+TASKS_TABLE.append(math_500)
+TASKS_TABLE.append(gpqa_diamond)
+
+# MODULE LOGIC
 if __name__ == "__main__":
-    # import debugpy
-    # debugpy.listen(5678)
-    # print("等待调试器附加…")
-    # debugpy.wait_for_client()
-    args = parse_args()
-    set_seed(args.seed)
-    infer(args)
+    print([t["name"] for t in TASKS_TABLE])
+    print(len(TASKS_TABLE))
