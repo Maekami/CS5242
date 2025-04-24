@@ -39,4 +39,4 @@ __pycache__/
 *.npy
 
 # 如果有 Jupyter 的输出文件也可以忽略
-.ipynb_checkpoints/
+.ipynb_checkpoints/general-RAG/remaining_set.json

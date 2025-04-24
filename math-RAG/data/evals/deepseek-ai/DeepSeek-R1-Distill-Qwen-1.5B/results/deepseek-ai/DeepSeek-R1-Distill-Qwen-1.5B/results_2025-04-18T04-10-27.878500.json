@@ -1,0 +1,115 @@
+{
+  "config_general": {
+    "lighteval_sha": "?",
+    "num_fewshot_seeds": 1,
+    "override_batch_size": -1,
+    "max_samples": null,
+    "job_id": 0,
+    "start_time": 5893071.673077064,
+    "end_time": 5893476.72932561,
+    "total_evaluation_time_secondes": "405.056248546578",
+    "model_name": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    "model_sha": "",
+    "model_dtype": null,
+    "model_size": null,
+    "generation_parameters": {
+      "early_stopping": null,
+      "repetition_penalty": null,
+      "frequency_penalty": null,
+      "length_penalty": null,
+      "presence_penalty": null,
+      "max_new_tokens": 30000,
+      "min_new_tokens": null,
+      "seed": null,
+      "stop_tokens": null,
+      "temperature": 0.7,
+      "top_k": null,
+      "min_p": null,
+      "top_p": 0.95,
+      "truncate_prompt": null,
+      "response_format": null
+    }
+  },
+  "results": {
+    "custom|aime25|0": {
+      "extractive_match": 0.2,
+      "extractive_match_stderr": 0.07427813527082075
+    },
+    "all": {
+      "extractive_match": 0.2,
+      "extractive_match_stderr": 0.07427813527082075
+    }
+  },
+  "versions": {
+    "custom|aime25|0": 1
+  },
+  "config_tasks": {
+    "custom|aime25": {
+      "name": "aime25",
+      "prompt_function": "aime_prompt_fn",
+      "hf_repo": "yentinglin/aime_2025",
+      "hf_subset": "default",
+      "metric": [
+        {
+          "metric_name": "extractive_match",
+          "higher_is_better": true,
+          "category": "3",
+          "use_case": "1",
+          "sample_level_fn": "sample_level_fn",
+          "corpus_level_fn": "mean"
+        }
+      ],
+      "hf_revision": null,
+      "hf_filter": null,
+      "hf_avail_splits": [
+        "train"
+      ],
+      "trust_dataset": false,
+      "evaluation_splits": [
+        "train"
+      ],
+      "few_shots_split": null,
+      "few_shots_select": null,
+      "generation_size": 32768,
+      "generation_grammar": null,
+      "stop_sequence": [],
+      "num_samples": null,
+      "suite": [
+        "custom"
+      ],
+      "original_num_docs": 30,
+      "effective_num_docs": 30,
+      "must_remove_duplicate_docs": false,
+      "version": 1
+    }
+  },
+  "summary_tasks": {
+    "custom|aime25|0": {
+      "hashes": {
+        "hash_examples": "bff825cfbfefb159",
+        "hash_full_prompts": "b15461515c449370",
+        "hash_input_tokens": "af6557205ecfcfb8",
+        "hash_cont_tokens": "a1be355efbc151d2"
+      },
+      "truncated": 0,
+      "non_truncated": 30,
+      "padded": 0,
+      "non_padded": 30,
+      "effective_few_shots": 0.0,
+      "num_truncated_few_shots": 0
+    }
+  },
+  "summary_general": {
+    "hashes": {
+      "hash_examples": "d3412966bd72bda0",
+      "hash_full_prompts": "e05c5f378d7adaf9",
+      "hash_input_tokens": "19ab20ab1f3502e0",
+      "hash_cont_tokens": "6598ad56af6ed908"
+    },
+    "truncated": 0,
+    "non_truncated": 30,
+    "padded": 0,
+    "non_padded": 30,
+    "num_truncated_few_shots": 0
+  }
+}
